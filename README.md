@@ -1,6 +1,7 @@
-# ⬡ FlowCraft — Workflow Engine
+# ⚡ Raze — Razors Through Workflows
 
-A single-file, full-stack workflow automation engine built with **Node.js**, **Express**, and **MongoDB**. Design multi-step workflows with conditional rule routing, approvals, notifications, and real-time execution tracking — all from a beautiful built-in UI.
+A single-file, full-stack workflow automation engine built with **Node.js**, **Express**, and **MongoDB**. Design multi-step workflows with conditional rule routing, approvals, notifications, and real-time execution tracking — all from a sleek built-in UI.
+
 ---
 
 ## ✨ Features
@@ -28,14 +29,14 @@ A single-file, full-stack workflow automation engine built with **Node.js**, **E
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/flowcraft.git
-cd flowcraft
+git clone https://github.com/YOUR_USERNAME/raze.git
+cd raze
 
 # 2. Install dependencies
 npm install
 
 # 3. Start the server
-MONGO_URI=mongodb://localhost:27017/flowcraft node server.js
+MONGO_URI=mongodb://localhost:27017/raze node server.js
 ```
 
 Then open [http://localhost:3000](http://localhost:3000) in your browser.
@@ -50,7 +51,7 @@ The app automatically seeds two sample workflows on first run:
 
 | Environment Variable | Default | Description |
 |---|---|---|
-| `MONGO_URI` | `mongodb://localhost:27017/flowcraft` | MongoDB connection string |
+| `MONGO_URI` | `mongodb://localhost:27017/raze` | MongoDB connection string |
 | `PORT` | `3000` | Port the server listens on |
 
 ---
@@ -65,7 +66,7 @@ The app automatically seeds two sample workflows on first run:
 4. Under **Network Access**, add `0.0.0.0/0` to allow all IPs
 5. Click **Connect → Drivers** and copy your connection string:
    ```
-   mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net/flowcraft?retryWrites=true&w=majority
+   mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net/raze?retryWrites=true&w=majority
    ```
 
 ### Step 2 — Deploy on Render (Free Tier)
@@ -86,7 +87,7 @@ The app automatically seeds two sample workflows on first run:
    ```
    MONGO_URI = mongodb+srv://...your atlas URI...
    ```
-6. Click **Deploy** — your app will be live at `https://flowcraft-xxxx.onrender.com`
+6. Click **Deploy** — your app will be live at `https://raze-xxxx.onrender.com`
 
 > **Note:** Render's free tier spins down after 15 minutes of inactivity. Use [cron-job.org](https://cron-job.org) (free) to ping your URL every 10 minutes to keep it awake.
 
@@ -169,7 +170,7 @@ DEFAULT
 ## 🗂️ Project Structure
 
 ```
-flowcraft/
+raze/
 ├── server.js        ← entire app (backend + frontend in one file)
 └── package.json
 ```
@@ -202,5 +203,3 @@ flowcraft/
 MIT — free to use, modify, and distribute.
 
 ---
-
-<p align="center">Built with ⚡ by FlowCraft</p>
