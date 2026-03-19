@@ -1774,6 +1774,15 @@ body.dark .topbar {
   background: linear-gradient(90deg, #1A1810 0%, #24221B 60%, #2A2820 100%) !important;
   border-bottom: 1px solid rgba(242,208,78,.2) !important;
 }
+body.dark #topbar-back-btn {
+  border-color: rgba(242,208,78,.2) !important;
+  color: rgba(242,208,78,.5) !important;
+}
+body.dark #topbar-back-btn:hover {
+  border-color: var(--mustard) !important;
+  color: var(--mustard) !important;
+  background: rgba(242,208,78,.08) !important;
+}
 
 /* ── MAIN CONTENT DARK MODE ── */
 body.dark .main {
@@ -2445,21 +2454,21 @@ function icon(id, size) {
   </div>
 
   <div class="nav-section">Workspace</div>
-  <div class="nav-item active" onclick="navigate('dashboard')">
+  <div class="nav-item active" onclick="navHistory.length=0;navigate('dashboard')">
     <span class="nav-icon"><svg width="18" height="18"><use href="#ic-dashboard"/></svg></span>
     Dashboard
   </div>
-  <div class="nav-item" onclick="navigate('workflows')">
+  <div class="nav-item" onclick="navHistory.length=0;navigate('workflows')">
     <span class="nav-icon"><svg width="18" height="18"><use href="#ic-workflow"/></svg></span>
     Workflows
   </div>
 
   <div class="nav-section">Execution</div>
-  <div class="nav-item" onclick="navigate('executions')">
+  <div class="nav-item" onclick="navHistory.length=0;navigate('executions')">
     <span class="nav-icon"><svg width="18" height="18"><use href="#ic-run"/></svg></span>
     Run Workflow
   </div>
-  <div class="nav-item" onclick="navigate('audit')">
+  <div class="nav-item" onclick="navHistory.length=0;navigate('audit')">
     <span class="nav-icon"><svg width="18" height="18"><use href="#ic-audit"/></svg></span>
     Audit Log
   </div>
@@ -2491,10 +2500,14 @@ function icon(id, size) {
 <div class="main">
   <div class="topbar">
     <div class="topbar-left">
+      <button id="topbar-back-btn" onclick="navigateBack()" style="display:none;align-items:center;gap:6px;background:none;border:1px solid var(--border-1);border-radius:8px;padding:5px 10px;cursor:pointer;font-size:.75rem;font-family:var(--font-mono);font-weight:700;color:var(--text-2);margin-right:6px;transition:all .18s;" onmouseenter="this.style.borderColor='var(--mustard)';this.style.color='var(--mustard)'" onmouseleave="this.style.borderColor='var(--border-1)';this.style.color='var(--text-2)'">
+        <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="12 4 6 10 12 16"/></svg>
+        <span id="topbar-back-label">back</span>
+      </button>
       <div class="topbar-icon" id="topbar-page-icon">
         <svg width="14" height="14"><use href="#ic-dashboard"/></svg>
       </div>
-      <div class="topbar-title" id="page-title">Dashboard</div>
+      <div class="topbar-title" id="page-title">dashboard</div>
     </div>
     <div class="topbar-right">
       <!-- LIVE indicator -->
@@ -3369,7 +3382,21 @@ document.addEventListener('click', function(e) {
   else if (action === 'modal-retry') retryFromAudit(btn.dataset.execId);
 });
 
-function navigate(page) {
+// ── Navigation history stack ──
+const navHistory = [];
+const ROOT_PAGES = new Set(['dashboard', 'workflows', 'executions', 'audit']);
+
+function navigate(page, { pushHistory = true } = {}) {
+  const currentActive = document.querySelector('.page.active');
+  const currentPage = currentActive ? currentActive.id.replace('page-', '') : null;
+
+  // Push current page to history only when navigating forward
+  if (pushHistory && currentPage && currentPage !== page) {
+    navHistory.push(currentPage);
+    // Cap history depth
+    if (navHistory.length > 20) navHistory.shift();
+  }
+
   // Animate page switch
   const pg = document.getElementById('page-' + page);
   if (pg) { pg.style.opacity = '0'; setTimeout(() => { pg.style.transition = 'opacity .2s ease'; pg.style.opacity = '1'; }, 10); }
@@ -3388,6 +3415,38 @@ function navigate(page) {
   if (page === 'workflows') renderWorkflowList();
   if (page === 'executions') renderExecutionPage();
   if (page === 'audit') renderAuditLog();
+
+  // Update back button
+  updateBackButton(page);
+}
+
+function navigateBack() {
+  if (!navHistory.length) return;
+  const prev = navHistory.pop();
+  // Restore context if going back to editor or rules
+  if (prev === 'editor' && currentWorkflowId) {
+    navigate(prev, { pushHistory: false });
+    loadEditor(currentWorkflowId);
+  } else if (prev === 'rules' && currentWorkflowId) {
+    navigate(prev, { pushHistory: false });
+    openRuleEditor(currentWorkflowId);
+  } else {
+    navigate(prev, { pushHistory: false });
+  }
+}
+
+function updateBackButton(currentPage) {
+  const btn = document.getElementById('topbar-back-btn');
+  const label = document.getElementById('topbar-back-label');
+  if (!btn) return;
+  if (navHistory.length === 0) {
+    btn.style.display = 'none';
+    return;
+  }
+  const prevPage = navHistory[navHistory.length - 1];
+  const titles = { dashboard:'Dashboard', workflows:'Workflows', editor:'Editor', rules:'Rules', executions:'Executions', audit:'Audit Log' };
+  btn.style.display = 'flex';
+  label.textContent = titles[prevPage] || prevPage;
 }
 
 function goBackToEditor() { navigate('editor'); loadEditor(currentWorkflowId); }
@@ -3852,8 +3911,22 @@ async function startExecution() {
     currentExecId = exec.id || exec._id;
     toast('Execution started', 'success');
     document.getElementById('exec-progress-card').style.display = '';
-    renderExecView(exec, wf);
+    await renderExecView(exec, wf);
+    scrollToApproval();
   } catch(e) { toast(e.message, 'error'); }
+}
+
+function scrollToApproval() {
+  // Prefer scrolling to the approval panel if visible, else scroll to the progress card
+  setTimeout(() => {
+    const target =
+      document.querySelector('.approval-panel') ||
+      document.querySelector('.retry-panel') ||
+      document.getElementById('exec-progress-card');
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, 120); // slight delay to let DOM settle after render
 }
 
 async function cancelExecution() {
@@ -3874,8 +3947,9 @@ async function approveStep(decision) {
     const exec = await API.post('/executions/' + currentExecId + '/approve', { decision, approver_id: 'user-ui' });
     const fresh = await API.get('/executions/' + currentExecId);
     const wf = await API.get('/workflows/' + exec.workflow_id);
-    renderExecView(fresh, wf);
+    await renderExecView(fresh, wf);
     toast(decision === 'approve' ? '✓ Approved' : '✕ Rejected', decision === 'approve' ? 'success' : 'error');
+    scrollToApproval();
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -4278,16 +4352,12 @@ async function retryFromAudit(id) {
     toast('Re-opening execution...', 'success');
     const exec = await API.post('/executions/' + id + '/retry');
     const wf = await API.get('/workflows/' + exec.workflow_id);
-    // Navigate to executions page and load this execution
     currentExecId = exec.id || exec._id;
     currentWorkflowId = exec.workflow_id;
     navigate('executions');
     document.getElementById('exec-progress-card').style.display = '';
-    renderExecView(exec, wf);
-    // Poll if it's waiting for approval
-    if (exec.status === 'in_progress') {
-      // Approval steps wait for manual action — the retry panel & approve buttons are now visible
-    }
+    await renderExecView(exec, wf);
+    scrollToApproval();
     toast('Execution re-opened — approve or reject below', 'success');
   } catch(e) { toast(e.message, 'error'); }
 }
