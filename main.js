@@ -89,14 +89,48 @@ const Execution = mongoose.model('Execution', ExecutionSchema);
 function evaluateCondition(condition, data) {
   if (condition.trim().toUpperCase() === 'DEFAULT') return true;
   try {
+    // Step 1: Replace string functions first (before any identifier substitution)
     let expr = condition
       .replace(/contains\((\w+),\s*['"](.+?)['"]\)/g, (_,f,v) => `(String(data['${f}']||'').includes('${v}'))`)
       .replace(/startsWith\((\w+),\s*['"](.+?)['"]\)/g, (_,f,v) => `(String(data['${f}']||'').startsWith('${v}'))`)
       .replace(/endsWith\((\w+),\s*['"](.+?)['"]\)/g, (_,f,v) => `(String(data['${f}']||'').endsWith('${v}'))`)
-      .replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)\b(?!\s*[\[('"])/g, (match) => {
-        const reserved = ['true','false','null','undefined','String','Number','Boolean'];
-        return reserved.includes(match) ? match : `data['${match}']`;
-      });
+      // Step 2: Replace == with === and != with !== for strict JS equality
+      .replace(/([^=!<>])={2}([^=])/g, '$1===$2')
+      .replace(/([^!<>=])!={1}([^=])/g, '$1!==$2');
+
+    // Step 3: Replace bare identifiers with data['field'] — but ONLY outside quoted strings
+    // Tokenize to skip over quoted string literals entirely
+    const reserved = new Set(['true','false','null','undefined','String','Number','Boolean','data']);
+    let result = '';
+    let i = 0;
+    while (i < expr.length) {
+      const ch = expr[i];
+      // Skip quoted strings verbatim
+      if (ch === '"' || ch === "'") {
+        const q = ch; let s = ch; i++;
+        while (i < expr.length && expr[i] !== q) { s += expr[i]; i++; }
+        s += (expr[i] || ''); i++;
+        result += s;
+        continue;
+      }
+      // Match identifier
+      const identMatch = expr.slice(i).match(/^[a-zA-Z_][a-zA-Z0-9_]*/);
+      if (identMatch) {
+        const word = identMatch[0];
+        const after = expr.slice(i + word.length).trimStart();
+        // Don't wrap if reserved, or already part of data[...], or followed by ( (function call)
+        if (!reserved.has(word) && expr[i + word.length] !== '(') {
+          result += `data['${word}']`;
+        } else {
+          result += word;
+        }
+        i += word.length;
+        continue;
+      }
+      result += ch; i++;
+    }
+    expr = result;
+
     const fn = new Function('data', `"use strict"; try { return !!(${expr}); } catch(e){ return false; }`);
     return fn(data);
   } catch(e) { return false; }
@@ -418,10 +452,20 @@ async function fixExpenseApprovalRules() {
       Step.findOne({ workflow_id: wf._id, name: 'Task Rejection' }),
     ]);
     if (!s1 || !s2 || !s3 || !s4) return;
+
+    // Ensure Finance Notification is an approval step so finance can approve/reject
+    if (s2.step_type !== 'approval') {
+      await Step.findByIdAndUpdate(s2._id, {
+        step_type: 'approval',
+        metadata: { assignee_email: 'finance@example.com', instructions: 'Finance team review — approve to escalate to CEO or reject.' }
+      });
+      console.log('✅ Finance Notification upgraded to approval step');
+    }
+
     await Rule.deleteMany({ step_id: { $in: [s1._id, s2._id, s3._id, s4._id] } });
     await Rule.insertMany([
       { _id: require('uuid').v4(), step_id: s1._id, condition: "amount > 100 && country == 'US' && priority == 'High'", next_step_id: s2._id, priority: 1 },
-      { _id: require('uuid').v4(), step_id: s1._id, condition: "amount <= 100 || department == 'HR'", next_step_id: s3._id, priority: 2 },
+      { _id: require('uuid').v4(), step_id: s1._id, condition: "amount <= 100 || department == 'HR'", next_step_id: s2._id, priority: 2 },
       { _id: require('uuid').v4(), step_id: s1._id, condition: "priority == 'Low' && country != 'US'", next_step_id: s4._id, priority: 3 },
       { _id: require('uuid').v4(), step_id: s1._id, condition: 'DEFAULT', next_step_id: s4._id, priority: 4 },
       { _id: require('uuid').v4(), step_id: s2._id, condition: 'amount > 10000', next_step_id: s3._id, priority: 1 },
@@ -449,14 +493,14 @@ async function seedSampleData() {
     }
   });
   const s1 = new Step({ _id: uuidv4(), workflow_id: wf1._id, name: 'Manager Approval', step_type: 'approval', order: 1, metadata: { assignee_email: 'manager@example.com', instructions: 'Review and approve or reject the expense.' } });
-  const s2 = new Step({ _id: uuidv4(), workflow_id: wf1._id, name: 'Finance Notification', step_type: 'notification', order: 2, metadata: { assignee_email: 'finance@example.com', notification_channel: 'email' } });
+  const s2 = new Step({ _id: uuidv4(), workflow_id: wf1._id, name: 'Finance Notification', step_type: 'approval', order: 2, metadata: { assignee_email: 'finance@example.com', instructions: 'Finance team review — approve to escalate to CEO or reject.' } });
   const s3 = new Step({ _id: uuidv4(), workflow_id: wf1._id, name: 'CEO Approval', step_type: 'approval', order: 3, metadata: { assignee_email: 'ceo@example.com', instructions: 'Final sign-off for high-value expenses.' } });
   const s4 = new Step({ _id: uuidv4(), workflow_id: wf1._id, name: 'Task Rejection', step_type: 'task', order: 4, metadata: { instructions: 'Log rejection and notify requester.' } });
   wf1.start_step_id = s1._id;
   await wf1.save(); await s1.save(); await s2.save(); await s3.save(); await s4.save();
   await Rule.insertMany([
     { _id: uuidv4(), step_id: s1._id, condition: "amount > 100 && country == 'US' && priority == 'High'", next_step_id: s2._id, priority: 1 },
-    { _id: uuidv4(), step_id: s1._id, condition: "amount <= 100 || department == 'HR'", next_step_id: s3._id, priority: 2 },
+    { _id: uuidv4(), step_id: s1._id, condition: "amount <= 100 || department == 'HR'", next_step_id: s2._id, priority: 2 },
     { _id: uuidv4(), step_id: s1._id, condition: "priority == 'Low' && country != 'US'", next_step_id: s4._id, priority: 3 },
     { _id: uuidv4(), step_id: s1._id, condition: 'DEFAULT', next_step_id: s4._id, priority: 4 },
     { _id: uuidv4(), step_id: s2._id, condition: 'amount > 10000', next_step_id: s3._id, priority: 1 },
@@ -1339,8 +1383,12 @@ tbody td { padding: 12px 14px; font-size: .84rem; vertical-align: middle; color:
 .rule-condition.default { color: var(--jet); font-weight: 700; background: var(--mustard-dim); border-color: rgba(242,208,78,.4); }
 
 /* ── FLOW DIAGRAM ── */
-.flow-diagram { display: flex; align-items: flex-start; gap: 0; padding: 20px 0; overflow-x: auto; position: relative; width: 100%; }
+.flow-diagram { display: flex; align-items: flex-start; gap: 0; padding: 20px 0; overflow: hidden; position: relative; width: 100%; }
 .flow-node { display: flex; flex-direction: column; align-items: center; position: relative; flex: 1; min-width: 140px; }
+.flow-node.slide-in { animation: flowSlideIn .4s cubic-bezier(.34,1.56,.64,1) both; }
+.flow-node.slide-out { animation: flowSlideOut .3s ease-in both; }
+@keyframes flowSlideIn { from { opacity: 0; transform: translateX(60px) scale(.92); } to { opacity: 1; transform: translateX(0) scale(1); } }
+@keyframes flowSlideOut { from { opacity: 1; transform: translateX(0) scale(1); } to { opacity: 0; transform: translateX(-60px) scale(.92); } }
 .flow-connector { display: flex; align-items: center; padding-top: 30px; flex-shrink: 0; flex: 0 0 48px; }
 .flow-connector-line { flex: 1; width: 48px; height: 3px; background: var(--bg-4); position: relative; transition: background .3s; }
 .flow-connector-line.done { background: var(--mustard); box-shadow: 0 0 5px var(--mustard-glow); }
@@ -1376,6 +1424,13 @@ tbody td { padding: 12px 14px; font-size: .84rem; vertical-align: middle; color:
 .approval-panel { background: var(--bg-2); border: 1px solid var(--blue-dim); border-radius: var(--radius-md); padding: 14px; margin-top: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .approval-info { flex: 1; font-size: .82rem; color: #24221B; font-weight: 600; }
 .approval-sub { font-size: .72rem; color: #5A5548; font-family: var(--font-mono); font-weight: 600; margin-top: 2px; }
+
+/* ── RETRY PANEL ── */
+.retry-panel { background: var(--red-dim); border: 1px solid rgba(255,95,95,.25); border-radius: var(--radius-md); padding: 14px 18px; margin-top: 12px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; animation: flowSlideIn .35s cubic-bezier(.34,1.56,.64,1) both; }
+.retry-panel-icon { width: 36px; height: 36px; background: rgba(255,95,95,.12); border: 1px solid rgba(255,95,95,.2); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--red); flex-shrink: 0; }
+.retry-panel-info { flex: 1; }
+.retry-panel-title { font-size: .84rem; font-weight: 700; color: var(--red); }
+.retry-panel-sub { font-size: .72rem; color: var(--text-2); font-family: var(--font-mono); font-weight: 600; margin-top: 2px; }
 
 /* ── LOG ENTRIES ── */
 .log-entry { background: linear-gradient(120deg, rgba(245,242,238,.9), rgba(240,235,228,.85)); border: 1px solid rgba(36,34,27,.08); border-radius: var(--radius-md); margin-bottom: 6px; overflow: hidden; transition: border-color .18s; }
@@ -1906,6 +1961,9 @@ body.dark .page-illus { background: linear-gradient(120deg, rgba(36,34,27,.95) 0
 body.dark .approval-panel { background: rgba(36,34,27,.85) !important; border-color: rgba(100,181,246,.2) !important; }
 body.dark .approval-info { color: #FFFFFF !important; }
 body.dark .approval-sub { color: #8A8678 !important; }
+body.dark .retry-panel { background: rgba(255,95,95,.08) !important; border-color: rgba(255,95,95,.2) !important; }
+body.dark .retry-panel-title { color: #FF7070 !important; }
+body.dark .retry-panel-sub { color: #8A8678 !important; }
 
 /* ── BTN GHOST DARK ── */
 body.dark .btn-ghost { color: #C8C4B8 !important; border-color: rgba(228,223,216,.2) !important; }
@@ -2436,7 +2494,7 @@ function icon(id, size) {
       <div class="topbar-icon" id="topbar-page-icon">
         <svg width="14" height="14"><use href="#ic-dashboard"/></svg>
       </div>
-      <div class="topbar-title" id="page-title">dashboard</div>
+      <div class="topbar-title" id="page-title">Dashboard</div>
     </div>
     <div class="topbar-right">
       <!-- LIVE indicator -->
@@ -2978,7 +3036,10 @@ function icon(id, size) {
         </div>
         <div class="text-muted mb-2" id="exec-meta" style="font-family:var(--font-mono);font-size:.72rem;color:#5A5548;font-weight:600;"></div>
         <div class="progress-wrap"><div class="progress-bar" id="exec-progress-bar" style="width:0%"></div></div>
-        <div style="margin-top:16px;" id="exec-steps-view"></div>
+        <div style="margin-top:16px;display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+          <div id="exec-step-counter" style="font-size:.7rem;font-family:var(--font-mono);color:var(--text-2);font-weight:600;opacity:.7;letter-spacing:.5px;"></div>
+        </div>
+        <div id="exec-steps-view"></div>
       </div>
       <div class="card" style="margin-top:14px;">
         <div class="card-title">
@@ -3304,6 +3365,8 @@ document.addEventListener('click', function(e) {
   else if (action === 'edit-schema') openSchemaModal(rid);
   else if (action === 'delete-schema') deleteSchemaField(rid);
   else if (action === 'view-logs') viewExecLogs(rid);
+  else if (action === 'audit-retry') retryFromAudit(rid);
+  else if (action === 'modal-retry') retryFromAudit(btn.dataset.execId);
 });
 
 function navigate(page) {
@@ -3829,66 +3892,208 @@ async function renderExecView(exec, wf) {
     (exec.ended_at ? ' <svg width="10" height="10" style="vertical-align:middle;opacity:.5;margin:0 2px;"><use href="#ic-clock"/></svg> ' + fmtShort(exec.ended_at) : '') +
     (exec.retries ? ' <svg width="10" height="10" style="vertical-align:middle;opacity:.5;margin:0 2px;"><use href="#ic-retry"/></svg> ' + exec.retries + ' retries' : '');
 
-  document.getElementById('exec-retry-btn').style.display = exec.status === 'failed' ? '' : 'none';
+  document.getElementById('exec-retry-btn').style.display = 'none';
   document.getElementById('exec-cancel-btn').style.display = exec.status === 'in_progress' ? '' : 'none';
 
   const steps = wf.steps || await API.get('/workflows/' + (wf._id||wf.id) + '/steps').catch(() => []);
-  const done = exec.logs.filter(l => l.status === 'completed').length;
-  document.getElementById('exec-progress-bar').style.width = steps.length ? Math.round(done / steps.length * 100) + '%' : '0%';
+  let progressPct = 0;
+  if (exec.status === 'completed') {
+    progressPct = 100;
+  } else if (exec.status === 'failed' || exec.status === 'canceled') {
+    const done = exec.logs.filter(l => l.status === 'completed' || l.status === 'rejected').length;
+    progressPct = steps.length ? Math.round(done / steps.length * 100) : 0;
+  } else {
+    const done = exec.logs.filter(l => l.status === 'completed').length;
+    progressPct = steps.length ? Math.round(done / steps.length * 100) : 0;
+  }
+  document.getElementById('exec-progress-bar').style.width = progressPct + '%';
 
   const sv = document.getElementById('exec-steps-view');
-  sv.innerHTML = '';
 
+  // ── Build the full ordered list of "visible" step slots ──
+  // For failed: trim steps after last executed. For completed: keep all but focus on last executed.
+  const lastExecutedIdx = steps.reduce((acc, s, i) =>
+    exec.logs.find(l => l.step_id === (s.id||s._id)) ? i : acc, -1);
+
+  // Build enriched step list — strip steps that were never reached (no log entry)
+  // This handles branching flows where some steps are bypassed
+  const visibleSteps = [];
+  steps.forEach((s, idx) => {
+    const hasLog = exec.logs.find(l => l.step_id === (s.id||s._id));
+    const isCurrentStep = exec.current_step_id === (s.id||s._id);
+    // Always include steps that ran OR are currently active
+    // For terminal states, only include steps that actually executed
+    if (exec.status === 'in_progress' || exec.status === 'pending') {
+      // Always include all steps for in-progress — window will slide to show current
+      visibleSteps.push({ type: 'step', data: s });
+    } else {
+      // completed/failed: only show steps that actually have a log
+      if (hasLog) visibleSteps.push({ type: 'step', data: s });
+    }
+  });
+
+  if (exec.status === 'completed' || exec.status === 'failed') {
+    visibleSteps.push({ type: 'terminal', status: exec.status, logs: exec.logs });
+  }
+
+  // ── Determine the "focus index" — anchor on the last step that actually ran ──
+  let focusIdx = 0;
+  if (exec.status === 'completed' || exec.status === 'failed') {
+    // Anchor window on last executed step so we never show unvisited steps
+    // The terminal node will naturally appear as the last slot
+    const lastExecVisIdx = visibleSteps.reduce((acc, vs, i) => {
+      if (vs.type === 'step' && exec.logs.find(l => l.step_id === (vs.data.id||vs.data._id))) return i;
+      return acc;
+    }, 0);
+    // Put the terminal as the right edge: focus = terminal index, but clamp window so no pending steps show
+    focusIdx = lastExecVisIdx + 1; // +1 = the terminal node index
+  } else {
+    // In-progress: centre on current step
+    const curIdx = visibleSteps.findIndex(vs => vs.type === 'step' && (vs.data.id||vs.data._id) === exec.current_step_id);
+    focusIdx = curIdx >= 0 ? curIdx : Math.max(0, visibleSteps.length - 1);
+  }
+
+  // ── Sliding window: show 3 cards, terminal always at right edge when done ──
+  const WINDOW = 3;
+  let winStart, winEnd;
+  if (exec.status === 'completed' || exec.status === 'failed') {
+    // Pin terminal to right edge, fill left with actually-executed steps
+    winEnd = visibleSteps.length;
+    winStart = Math.max(0, winEnd - WINDOW);
+  } else {
+    // Centre around current step
+    winStart = Math.max(0, focusIdx - Math.floor(WINDOW / 2));
+    winEnd = winStart + WINDOW;
+    if (winEnd > visibleSteps.length) { winEnd = visibleSteps.length; winStart = Math.max(0, winEnd - WINDOW); }
+  }
+  const windowSlots = visibleSteps.slice(winStart, winEnd);
+
+  // Track previous window start for slide direction
+  const prevWinStart = sv._prevWinStart !== undefined ? sv._prevWinStart : winStart;
+  const slideDirection = winStart > prevWinStart ? 'right' : winStart < prevWinStart ? 'left' : 'none';
+  sv._prevWinStart = winStart;
+
+  sv.innerHTML = '';
   const flowWrap = document.createElement('div');
   flowWrap.className = 'flow-diagram';
 
-  steps.forEach((s, idx) => {
-    const sid = s.id || s._id;
-    const log = exec.logs.find(l => l.step_id === sid);
-    const isCurrent = exec.current_step_id === sid;
-    let state = 'pending';
-    if (log) state = log.status === 'completed' ? 'done' : 'failed';
-    if (isCurrent && exec.status === 'in_progress') state = 'current';
+  // ── Left ellipsis indicator ──
+  if (winStart > 0) {
+    const ellip = document.createElement('div');
+    ellip.style.cssText = 'display:flex;align-items:center;padding-top:30px;flex-shrink:0;opacity:.4;font-size:.75rem;font-family:var(--font-mono);color:var(--text-2);padding-right:6px;';
+    ellip.textContent = '···';
+    flowWrap.appendChild(ellip);
+  }
 
-    const iconId = STEP_ICON_MAP[s.step_type] || 'ic-task';
+  windowSlots.forEach((slot, wi) => {
+    const globalIdx = winStart + wi;
+    const isNewlySlid = slideDirection !== 'none' && (
+      (slideDirection === 'right' && wi === windowSlots.length - 1) ||
+      (slideDirection === 'left' && wi === 0)
+    );
 
-    const node = document.createElement('div');
-    node.className = 'flow-node';
+    if (slot.type === 'terminal') {
+      // ── Terminal node ──
+      const node = document.createElement('div');
+      node.className = 'flow-node' + (isNewlySlid ? ' slide-in' : '');
 
-    const box = document.createElement('div');
-    box.className = 'flow-step-box ' + state;
+      const isApproverRejection = slot.logs && [...slot.logs].reverse().find(l => l.status === 'rejected');
+      const isCompleted = slot.status === 'completed';
 
-    const iconColor = state === 'done' ? 'var(--green)' : state === 'current' ? 'var(--blue)' : state === 'failed' ? 'var(--red)' : 'var(--text-2)';
-    box.innerHTML =
-      '<div class="flow-step-icon"><svg width="28" height="28" style="color:' + iconColor + '"><use href="#' + iconId + '"/></svg></div>' +
-      '<div class="flow-step-name" title="' + esc(s.name) + '">' + esc(s.name) + '</div>' +
-      '<div class="flow-step-type">' + s.step_type + '</div>' +
-      '<div class="flow-step-status">' +
-        (state === 'current' ? '<span class="spinner"></span>' : '<span class="badge badge-' + (log ? log.status : (isCurrent ? 'in_progress' : 'pending')) + '" style="font-size:.68rem;padding:2px 8px;">' + (state === 'done' ? '✓' : state === 'failed' ? '✕' : '…') + '</span>') +
-      '</div>';
-    node.appendChild(box);
+      // Check if the last executed step was a "rejection" step by name
+      const lastLog = slot.logs && [...slot.logs].reverse().find(l => l.status === 'completed' || l.status === 'rejected');
+      const lastStepName = lastLog ? (lastLog.step_name || '').toLowerCase() : '';
+      const isTaskRejection = isCompleted && (lastStepName.includes('reject') || lastStepName.includes('denial') || lastStepName.includes('decline'));
 
-    if (isCurrent && exec.status === 'in_progress' && s.step_type === 'approval') {
-      const apanel = document.createElement('div');
-      apanel.style.cssText = 'margin-top:10px;width:100%;max-width:180px;';
-      apanel.innerHTML =
-        '<div style="display:flex;flex-direction:column;gap:4px;">' +
-          '<button class="btn btn-primary btn-sm" data-dec="approve" onclick="_doApprove(this.dataset.dec)" style="width:100%;justify-content:center;"><svg width="13" height="13"><use href="#ic-check"/></svg> Approve</button>' +
-          '<button class="btn btn-danger btn-sm" data-dec="reject" onclick="_doApprove(this.dataset.dec)" style="width:100%;justify-content:center;"><svg width="13" height="13"><use href="#ic-close"/></svg> Reject</button>' +
+      // Determine terminal state: green (approved/completed), red (rejected by approver or routed to rejection step)
+      const termIsRed = isApproverRejection || isTaskRejection;
+      const termColor = termIsRed ? 'var(--red)' : 'var(--green)';
+      const termIcon = termIsRed ? 'ic-cancel' : 'ic-check-circle';
+      const termLabel = termIsRed ? (isApproverRejection ? 'Rejected' : 'Task Rejected') : 'Completed';
+      const termBadge = termIsRed ? (isApproverRejection ? 'rejected' : 'failed') : 'completed';
+      const termBoxClass = termIsRed ? 'failed' : 'done';
+
+      const termBox = document.createElement('div');
+      termBox.className = 'flow-step-box ' + termBoxClass;
+      if (!termIsRed) termBox.style.cssText = 'border-color:var(--border-green);background:var(--green-dim);';
+      termBox.innerHTML =
+        '<div class="flow-step-icon"><svg width="28" height="28" style="color:' + termColor + '"><use href="#' + termIcon + '"/></svg></div>' +
+        '<div class="flow-step-name" style="color:' + termColor + ';">' + termLabel + '</div>' +
+        '<div class="flow-step-type">workflow end</div>' +
+        '<div class="flow-step-status"><span class="badge badge-' + termBadge + '" style="font-size:.68rem;padding:2px 8px;">' + (termIsRed ? '✕' : '✓') + '</span></div>';
+      node.appendChild(termBox);
+      flowWrap.appendChild(node);
+
+    } else {
+      // ── Regular step node ──
+      const s = slot.data;
+      const sid = s.id || s._id;
+      const log = exec.logs.find(l => l.step_id === sid);
+      const isCurrent = exec.current_step_id === sid;
+      let state = 'pending';
+      if (log) state = log.status === 'completed' ? 'done' : 'failed';
+      if (isCurrent && exec.status === 'in_progress') state = 'current';
+
+      const iconId = STEP_ICON_MAP[s.step_type] || 'ic-task';
+      const iconColor = state === 'done' ? 'var(--green)' : state === 'current' ? 'var(--blue)' : state === 'failed' ? 'var(--red)' : 'var(--text-2)';
+
+      const node = document.createElement('div');
+      node.className = 'flow-node' + (isNewlySlid ? ' slide-in' : '');
+
+      const box = document.createElement('div');
+      box.className = 'flow-step-box ' + state;
+      box.innerHTML =
+        '<div class="flow-step-icon"><svg width="28" height="28" style="color:' + iconColor + '"><use href="#' + iconId + '"/></svg></div>' +
+        '<div class="flow-step-name" title="' + esc(s.name) + '">' + esc(s.name) + '</div>' +
+        '<div class="flow-step-type">' + s.step_type + '</div>' +
+        '<div class="flow-step-status">' +
+          (state === 'current' ? '<span class="spinner"></span>' : '<span class="badge badge-' + (log ? log.status : (isCurrent ? 'in_progress' : 'pending')) + '" style="font-size:.68rem;padding:2px 8px;">' + (state === 'done' ? '✓' : state === 'failed' ? '✕' : '…') + '</span>') +
         '</div>';
-      node.appendChild(apanel);
+      node.appendChild(box);
+
+      if (isCurrent && exec.status === 'in_progress' && s.step_type === 'approval') {
+        const apanel = document.createElement('div');
+        apanel.style.cssText = 'margin-top:10px;width:100%;max-width:180px;';
+        apanel.innerHTML =
+          '<div style="display:flex;flex-direction:column;gap:4px;">' +
+            '<button class="btn btn-primary btn-sm" data-dec="approve" onclick="_doApprove(this.dataset.dec)" style="width:100%;justify-content:center;"><svg width="13" height="13"><use href="#ic-check"/></svg> Approve</button>' +
+            '<button class="btn btn-danger btn-sm" data-dec="reject" onclick="_doApprove(this.dataset.dec)" style="width:100%;justify-content:center;"><svg width="13" height="13"><use href="#ic-close"/></svg> Reject</button>' +
+          '</div>';
+        node.appendChild(apanel);
+      }
+      flowWrap.appendChild(node);
     }
 
-    flowWrap.appendChild(node);
-
-    if (idx < steps.length - 1) {
-      const connState = log && log.status === 'completed' ? 'done' : (isCurrent ? 'active' : '');
+    // ── Connector between slots (not after last) ──
+    if (wi < windowSlots.length - 1) {
+      const curSlot = slot;
+      const log = curSlot.type === 'step' ? exec.logs.find(l => l.step_id === ((curSlot.data.id||curSlot.data._id))) : null;
+      const isCur = curSlot.type === 'step' && exec.current_step_id === (curSlot.data.id||curSlot.data._id);
+      const connState = log && log.status === 'completed' ? 'done' : (isCur ? 'active' : '');
       const conn = document.createElement('div');
       conn.className = 'flow-connector';
       conn.innerHTML = '<div class="flow-connector-line ' + connState + '"></div><div class="flow-connector-arrow' + (connState ? ' ' + connState : '') + '"></div>';
       flowWrap.appendChild(conn);
     }
   });
+
+  // ── Right ellipsis indicator ──
+  if (winEnd < visibleSteps.length) {
+    const ellip = document.createElement('div');
+    ellip.style.cssText = 'display:flex;align-items:center;padding-top:30px;flex-shrink:0;opacity:.4;font-size:.75rem;font-family:var(--font-mono);color:var(--text-2);padding-left:6px;';
+    ellip.textContent = '···';
+    flowWrap.appendChild(ellip);
+  }
+
+  // ── Step counter ──
+  const counterEl = document.getElementById('exec-step-counter');
+  if (counterEl) {
+    const totalReal = steps.length;
+    const doneCount = exec.logs.filter(l => l.status === 'completed' || l.status === 'rejected').length;
+    if (exec.status === 'completed') counterEl.textContent = 'ALL ' + totalReal + ' STEPS DONE';
+    else if (exec.status === 'failed') counterEl.textContent = doneCount + ' / ' + totalReal + ' STEPS · ENDED';
+    else counterEl.textContent = 'STEP ' + (doneCount + 1) + ' OF ' + totalReal;
+  }
 
   sv.appendChild(flowWrap);
 
@@ -3907,6 +4112,26 @@ async function renderExecView(exec, wf) {
       '<button class="btn btn-primary" data-dec="approve" onclick="_doApprove(this.dataset.dec)"><svg width="15" height="15"><use href="#ic-check"/></svg> Approve</button>' +
       '<button class="btn btn-danger" data-dec="reject" onclick="_doApprove(this.dataset.dec)"><svg width="15" height="15"><use href="#ic-close"/></svg> Reject</button>';
     sv.appendChild(panel);
+  }
+
+  // ── Retry panel — shown when execution failed/rejected ──
+  if (exec.status === 'failed') {
+    const failedLog = [...exec.logs].reverse().find(l => l.status === 'rejected' || l.status === 'failed');
+    const isRejection = failedLog && failedLog.status === 'rejected';
+    const failedStepName = failedLog ? failedLog.step_name : 'the failed step';
+
+    const rPanel = document.createElement('div');
+    rPanel.className = 'retry-panel';
+    rPanel.innerHTML =
+      '<div class="retry-panel-icon"><svg width="18" height="18"><use href="#ic-warning"/></svg></div>' +
+      '<div class="retry-panel-info">' +
+        '<div class="retry-panel-title">' + (isRejection ? 'Accidentally rejected?' : 'Execution failed') + '</div>' +
+        '<div class="retry-panel-sub">' + (isRejection ? 'Rejected at <strong style="color:var(--text-1);">' + esc(failedStepName) + '</strong> — retry will reopen that approval step' : 'Failed at <strong style="color:var(--text-1);">' + esc(failedStepName) + '</strong> — retry will re-run from that step') + '</div>' +
+      '</div>' +
+      '<button class="btn btn-primary" onclick="retryExecution()" style="flex-shrink:0;">' +
+        '<svg width="15" height="15"><use href="#ic-retry"/></svg> ' + (isRejection ? 'Re-open Approval' : 'Retry') +
+      '</button>';
+    sv.appendChild(rPanel);
   }
 
   // ── LOGS ──
@@ -3987,7 +4212,10 @@ async function renderAuditLog() {
         '<td class="wf-meta-cell" style="font-family:var(--font-mono);font-size:.76rem;font-weight:600;">' + esc(e.triggered_by || '-') + '</td>' +
         '<td class="wf-meta-cell" style="font-family:var(--font-mono);font-size:.76rem;font-weight:600;">' + fmtShort(e.started_at) + '</td>' +
         '<td class="wf-meta-cell" style="font-family:var(--font-mono);font-size:.76rem;font-weight:600;">' + fmtShort(e.ended_at) + '</td>' +
-        '<td><button class="btn btn-ghost btn-xs" data-action="view-logs" data-k="' + k + '"><svg width="11" height="11" style="vertical-align:middle;"><use href="#ic-log"/></svg> Logs</button></td>';
+        '<td style="display:flex;gap:6px;align-items:center;">' +
+          '<button class="btn btn-ghost btn-xs" data-action="view-logs" data-k="' + k + '"><svg width="11" height="11" style="vertical-align:middle;"><use href="#ic-log"/></svg> Logs</button>' +
+          (e.status === 'failed' ? '<button class="btn btn-xs" data-action="audit-retry" data-k="' + k + '" style="background:var(--red-dim);color:var(--red);border:1px solid rgba(255,95,95,.25);"><svg width="11" height="11" style="vertical-align:middle;"><use href="#ic-retry"/></svg> Re-open</button>' : '') +
+        '</td>';
       tbody.appendChild(tr);
     });
   } catch(e) { toast(e.message, 'error'); }
@@ -4013,7 +4241,54 @@ async function viewExecLogs(id) {
         '<div class="log-body" id="' + lid + '"><div class="log-json">' + esc(JSON.stringify(l, null, 2)) + '</div></div>';
       body.appendChild(entry);
     });
+
+    // ── Retry panel inside modal for failed executions ──
+    const footer = document.querySelector('#modal-exec-logs .modal-footer');
+    const existingRetry = footer.querySelector('.modal-retry-panel');
+    if (existingRetry) existingRetry.remove();
+
+    if (exec.status === 'failed') {
+      const failedLog = [...exec.logs].reverse().find(l => l.status === 'rejected' || l.status === 'failed');
+      const isRejection = failedLog && failedLog.status === 'rejected';
+      const failedStepName = failedLog ? failedLog.step_name : 'the failed step';
+      const execId = exec.id || exec._id;
+
+      const rPanel = document.createElement('div');
+      rPanel.className = 'modal-retry-panel';
+      rPanel.style.cssText = 'flex:1;display:flex;align-items:center;gap:12px;background:var(--red-dim);border:1px solid rgba(255,95,95,.22);border-radius:var(--radius-sm);padding:10px 14px;margin-right:8px;';
+      rPanel.innerHTML =
+        '<svg width="15" height="15" style="color:var(--red);flex-shrink:0;"><use href="#ic-warning"/></svg>' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div style="font-size:.8rem;font-weight:700;color:var(--red);">' + (isRejection ? 'Accidentally rejected?' : 'Step failed') + '</div>' +
+          '<div style="font-size:.7rem;color:var(--text-2);font-family:var(--font-mono);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">at <strong style="color:var(--text-1);">' + esc(failedStepName) + '</strong></div>' +
+        '</div>' +
+        '<button class="btn btn-primary btn-sm" data-action="modal-retry" data-exec-id="' + esc(execId) + '" style="flex-shrink:0;white-space:nowrap;">' +
+          '<svg width="13" height="13"><use href="#ic-retry"/></svg> ' + (isRejection ? 'Re-open Approval' : 'Retry') +
+        '</button>';
+      footer.insertBefore(rPanel, footer.firstChild);
+    }
+
     openModal('modal-exec-logs');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function retryFromAudit(id) {
+  try {
+    closeModal('modal-exec-logs');
+    toast('Re-opening execution...', 'success');
+    const exec = await API.post('/executions/' + id + '/retry');
+    const wf = await API.get('/workflows/' + exec.workflow_id);
+    // Navigate to executions page and load this execution
+    currentExecId = exec.id || exec._id;
+    currentWorkflowId = exec.workflow_id;
+    navigate('executions');
+    document.getElementById('exec-progress-card').style.display = '';
+    renderExecView(exec, wf);
+    // Poll if it's waiting for approval
+    if (exec.status === 'in_progress') {
+      // Approval steps wait for manual action — the retry panel & approve buttons are now visible
+    }
+    toast('Execution re-opened — approve or reject below', 'success');
   } catch(e) { toast(e.message, 'error'); }
 }
 
