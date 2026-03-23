@@ -199,9 +199,3 @@ raze/
 - **Fonts** — Domine, Space Mono, Outfit (Google Fonts)
 
 ---
-
-## 📄 License
-
-MIT — free to use, modify, and distribute.
-
----
